@@ -1,0 +1,46 @@
+name: check
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed .
+      - name: Analyze
+        run: dart analyze --fatal-infos
+      - name: Check lib/src/version.dart matches pubspec.yaml
+        run: |
+          dart run tool/generate_version.dart
+          git diff --exit-code lib/src/version.dart
+
+  test:
+    # Hashes and behavior must be identical on every OS and architecture.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-26.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      - name: Test
+        run: dart test
+      - name: Run turbodart on itself
+        run: dart run turbodart run test analyze --output-logs=hash-only

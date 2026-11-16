@@ -1,0 +1,115 @@
+name: release
+
+# A dry run after each successful check of a push to main or dev, reporting
+# what would be released; a real release when run by hand.
+on:
+  workflow_run:
+    workflows: [check]
+    types: [completed]
+    branches: [main, dev]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write # for publishing to pub.dev with a service account
+    outputs:
+      released: ${{ steps.rylease.outputs.released }}
+      version: ${{ steps.rylease.outputs.version }}
+      notes: ${{ steps.rylease.outputs.notes }}
+      dry-run: ${{ steps.mode.outputs.dry-run }}
+      ref: ${{ steps.mode.outputs.ref }}
+    steps:
+      - id: mode
+        run: |
+          echo "dry-run=${{ github.event_name != 'workflow_dispatch' }}" >> "$GITHUB_OUTPUT"
+          echo "ref=${{ github.event.workflow_run.head_branch || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.mode.outputs.ref }}
+          fetch-depth: 0 # full history is needed to find the previous release
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+
+      # pub.dev takes a Google Cloud service account's identity token from a
+      # workflow that a tag push didn't start; see README.md#releasing.
+      - if: steps.mode.outputs.dry-run == 'false'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.PUB_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.PUB_SERVICE_ACCOUNT }}
+      - if: steps.mode.outputs.dry-run == 'false'
+        run: echo "PUB_TOKEN=$(gcloud auth print-identity-token --audiences=https://pub.dev)" >> "$GITHUB_ENV"
+
+      # Conventional commits since the last tag decide the bump; the version
+      # goes in pubspec.yaml and lib/src/version.dart, the notes in
+      # CHANGELOG.md, then it's committed, tagged, released and published.
+      - id: rylease
+        uses: ryangarber/rylease@v3
+        with:
+          dry-run: ${{ steps.mode.outputs.dry-run }}
+          steps: |
+            - uses: conventional
+            - uses: fs/write-version
+              with: { format: dart }
+            - uses: exec/command
+              with:
+                phase: write
+                command: dart run tool/generate_version.dart
+                files: [lib/src/version.dart]
+            - uses: fs/write-changes
+              with: { heading: "## {version}" }
+            - uses: git/commit
+            - uses: dart/publish
+
+  build:
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: linux-x64 }
+          - { os: ubuntu-26.04-arm, target: linux-arm64 }
+          - { os: macos-26-intel, target: macos-x64 }
+          - { os: macos-latest, target: macos-arm64 }
+          - { os: windows-latest, target: windows-x64, ext: .exe }
+          - { os: windows-11-arm, target: windows-arm64, ext: .exe }
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A dry run has no tag, so it builds what it checked.
+          ref: ${{ needs.release.outputs.dry-run == 'true' && needs.release.outputs.ref || format('v{0}', needs.release.outputs.version) }}
+          fetch-depth: 0
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      - name: Build
+        shell: bash # the same on Windows; dart compile doesn't create dist/
+        run: |
+          mkdir -p dist
+          dart compile exe bin/turbodart.dart -o dist/turbodart-${{ matrix.target }}${{ matrix.ext }}
+      - uses: ryangarber/rylease@v3
+        with:
+          version: ${{ needs.release.outputs.version }}
+          notes: ${{ needs.release.outputs.notes }}
+          dry-run: ${{ needs.release.outputs.dry-run }}
+          scheme: semver
+          history: git/tags
+          steps: |
+            - uses: github/upload-release-assets
+              with:
+                files: ["dist/*"]
+                dryRunArtifact: true
