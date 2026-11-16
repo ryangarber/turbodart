@@ -20,6 +20,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
+    environment: pub.dev
     permissions:
       contents: write
       id-token: write # for publishing to pub.dev with a service account
@@ -43,13 +44,15 @@ jobs:
 
       # pub.dev takes a Google Cloud service account's identity token from a
       # workflow that a tag push didn't start; see README.md#releasing.
-      - if: steps.mode.outputs.dry-run == 'false'
+      - id: auth
+        if: steps.mode.outputs.dry-run == 'false'
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ vars.PUB_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.PUB_SERVICE_ACCOUNT }}
-      - if: steps.mode.outputs.dry-run == 'false'
-        run: echo "PUB_TOKEN=$(gcloud auth print-identity-token --audiences=https://pub.dev)" >> "$GITHUB_ENV"
+          workload_identity_provider: ${{ secrets.PUB_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.PUB_SERVICE_ACCOUNT }}
+          token_format: id_token
+          id_token_audience: https://pub.dev
+          id_token_include_email: true
 
       # Conventional commits since the last tag decide the bump; the version
       # goes in pubspec.yaml and lib/src/version.dart, the notes in
@@ -71,6 +74,8 @@ jobs:
               with: { heading: "## {version}" }
             - uses: git/commit
             - uses: dart/publish
+              with:
+                token: ${{ steps.auth.outputs.id_token }}
 
   build:
     needs: release
