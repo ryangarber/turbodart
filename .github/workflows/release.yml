@@ -75,7 +75,7 @@ jobs:
             - uses: git/commit
             - uses: dart/publish
               with:
-                token: ${{ steps.auth.outputs.id_token }}
+                token: ${{ steps.auth.outputs.id_token || 'dummy' }}
 
   build:
     needs: release
